@@ -175,7 +175,7 @@ int main(int argc, char** argv)
     GPULayerDoublets* h_doublets;
     cudaMallocHost(&h_allEvents, nEvents * sizeof(GPUEvent));
     //per each event per each layerPair you have a max number of doublets
-    cudaMallocHost(&h_indices, nEvents *maxNumberOfLayerPairs*maxNumberOfDoublets*2* sizeof(int));
+    gpuErrchk(cudaMallocHost(&h_indices, nEvents *maxNumberOfLayerPairs*maxNumberOfDoublets*2* sizeof(int)));
     cudaMallocHost(&h_doublets, nEvents *maxNumberOfLayerPairs * sizeof(GPULayerDoublets));
 
     //per each event per each layer you have a max number of hits x y z
@@ -184,33 +184,13 @@ int main(int argc, char** argv)
     unsigned int* h_rootLayerPairs;
 
     cudaMallocHost(&h_layers, nEvents * maxNumberOfLayers * sizeof(GPULayerHits));
-    cudaMallocHost(&h_x, nEvents * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
+    gpuErrchk(cudaMallocHost(&h_x, nEvents * maxNumberOfLayers * maxNumberOfHits * sizeof(float)));
     cudaMallocHost(&h_y, nEvents * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
     cudaMallocHost(&h_z, nEvents * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
     cudaMallocHost(&h_rootLayerPairs, nEvents * maxNumberOfRootLayerPairs * sizeof(int));
 
 
-    //GPU ALLOCATIONS
-    std::cout << "preallocating memory on GPU " << std::endl;
-    Region* d_regionParams;
 
-    GPUEvent *d_events;
-    unsigned int* d_indices;
-    GPULayerDoublets* d_doublets;
-    GPULayerHits* d_layers;
-    float *d_x, *d_y, *d_z;
-    unsigned int* d_rootLayerPairs;
-
-    cudaMalloc(&d_regionParams, sizeof(Region));
-    cudaMemcpy(d_regionParams, h_regionParams, sizeof(Region), cudaMemcpyHostToDevice);
-    cudaMalloc(&d_events, eventsPreallocatedOnGPU * sizeof(GPUEvent));
-    cudaMalloc(&d_indices, eventsPreallocatedOnGPU *maxNumberOfLayerPairs*maxNumberOfDoublets*2* sizeof(int));
-    cudaMalloc(&d_doublets, eventsPreallocatedOnGPU *maxNumberOfLayerPairs * sizeof(GPULayerDoublets));
-    cudaMalloc(&d_layers, eventsPreallocatedOnGPU * maxNumberOfLayers * sizeof(GPULayerHits));
-    cudaMalloc(&d_x, eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
-    cudaMalloc(&d_y, eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
-    cudaMalloc(&d_z, eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
-    cudaMalloc(&d_rootLayerPairs, eventsPreallocatedOnGPU * maxNumberOfRootLayerPairs * sizeof(unsigned int));
 
     for (unsigned int i = 0; i < nEvents; ++i)
     {
@@ -290,7 +270,7 @@ int main(int argc, char** argv)
     }
 
 
-
+#ifdef FP_DEBUG
     for (unsigned int i = 0; i < nEvents; ++i)
     {
         assert(h_allEvents[i].eventId == hostEvents[i].eventId);
@@ -331,7 +311,36 @@ int main(int argc, char** argv)
         }
 
     }
+#endif
 
+    int nGPUs;
+
+    cudaGetDeviceCount(&nGPUs);
+    std::cout << "Number of available GPUs "<< nGPUs << std::endl;
+
+
+
+    //GPU ALLOCATIONS
+    std::cout << "preallocating memory on GPU " << std::endl;
+    Region* d_regionParams;
+
+    GPUEvent *d_events;
+    unsigned int* d_indices;
+    GPULayerDoublets* d_doublets;
+    GPULayerHits* d_layers;
+    float *d_x, *d_y, *d_z;
+    unsigned int* d_rootLayerPairs;
+
+    cudaMalloc(&d_regionParams, sizeof(Region));
+    cudaMemcpy(d_regionParams, h_regionParams, sizeof(Region), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_events, eventsPreallocatedOnGPU * sizeof(GPUEvent));
+    cudaMalloc(&d_indices, eventsPreallocatedOnGPU *maxNumberOfLayerPairs*maxNumberOfDoublets*2* sizeof(int));
+    cudaMalloc(&d_doublets, eventsPreallocatedOnGPU *maxNumberOfLayerPairs * sizeof(GPULayerDoublets));
+    cudaMalloc(&d_layers, eventsPreallocatedOnGPU * maxNumberOfLayers * sizeof(GPULayerHits));
+    cudaMalloc(&d_x, eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
+    cudaMalloc(&d_y, eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
+    cudaMalloc(&d_z, eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
+    cudaMalloc(&d_rootLayerPairs, eventsPreallocatedOnGPU * maxNumberOfRootLayerPairs * sizeof(unsigned int));
     //////////////////////////////////////////////////////////
     // ALLOCATIONS FOR THE INTERMEDIATE RESULTS (STAYS ON GPU)
     //////////////////////////////////////////////////////////
@@ -370,8 +379,10 @@ int main(int argc, char** argv)
     //INITIALIZATION IS NOW OVER
     //HERE STARTS THE COMPUTATION
 
+
     for (unsigned int i = 0; i < nEvents; ++i)
     {
+
 //        unsigned int i =1;
         unsigned int streamIndex = i%numberOfCUDAStreams;
 //        unsigned int streamIndex =1;
@@ -436,7 +447,7 @@ int main(int argc, char** argv)
 //                 d_regionParams, maxNumberOfDoublets, maxNumberOfHits);
 //        cudaMemsetAsync(&d_foundNtuplets[streamIndex], 0, sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ), streams[streamIndex]);
 
-        kernel_find_ntuplets<<<numberOfBlocks_find,1,0,streams[streamIndex]>>>(&d_events[streamIndex],
+        kernel_find_ntuplets<<<numberOfBlocks_find,256,0,streams[streamIndex]>>>(&d_events[streamIndex],
                 &d_doublets[d_firstLayerPairInEvt], &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets],
                 &d_foundNtuplets[streamIndex],&d_rootLayerPairs[maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
 
@@ -446,8 +457,8 @@ int main(int argc, char** argv)
         cudaMemcpyAsync(&h_foundNtuplets[streamIndex], &d_foundNtuplets[streamIndex], sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ), cudaMemcpyDeviceToHost, streams[streamIndex]);
         cudaMemsetAsync(&device_isOuterHitOfCell[d_firstHitInEvent], 0, maxNumberOfLayers * maxNumberOfHits* sizeof(GPUSimpleVector<maxCellsPerHit, unsigned int>), streams[streamIndex]);
 
-        cudaStreamSynchronize(streams[streamIndex]);
-        std::cout << "found quadruplets " << h_foundNtuplets[streamIndex].size() << std::endl;
+//        cudaStreamSynchronize(streams[streamIndex]);
+//        std::cout << "found quadruplets " << h_foundNtuplets[streamIndex].size() << std::endl;
 
 // COPY OF THE RESULTS
     }
@@ -456,6 +467,8 @@ int main(int argc, char** argv)
 
     for(int i = 0; i < numberOfCUDAStreams; ++i)
     {
+        cudaStreamSynchronize(streams[i]);
+
         cudaStreamDestroy(streams[i]);
 
     }
