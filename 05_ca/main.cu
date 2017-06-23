@@ -728,8 +728,6 @@ double stop = omp_get_wtime();
     cudaFreeHost(h_indices);
     cudaFreeHost(h_doublets);
 
-
-
     return 0;
 }
 
