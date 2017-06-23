@@ -1,3 +1,5 @@
+#include <chrono>
+#include <thread>
 #include <vector>
 #include <iostream>
 #include <assert.h>
@@ -397,12 +399,20 @@ int main(int argc, char** argv)
     std::vector<GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> *> d_foundNtuplets;
     d_foundNtuplets.resize(nGPUs);
 
+    std::vector<std::vector<GPULayerHits*> > tmp_layers;
+    tmp_layers.resize(nGPUs);
+    std::vector<std::vector<GPULayerDoublets*> > tmp_layerDoublets;
+    tmp_layerDoublets.resize(nGPUs);
+
 
 
 
     for (unsigned int gpuIndex = 0; gpuIndex < nGPUs; ++gpuIndex)
     {
         cudaSetDevice(gpuIndex);
+
+        tmp_layers[gpuIndex].resize(numberOfCUDAStreams);
+        tmp_layerDoublets[gpuIndex].resize(numberOfCUDAStreams);
 
         cudaMalloc(&d_regionParams[gpuIndex], sizeof(Region));
         cudaMemcpy(d_regionParams[gpuIndex], h_regionParams, sizeof(Region),
@@ -451,6 +461,10 @@ int main(int argc, char** argv)
         streams[gpuIndex].resize(numberOfCUDAStreams);
         for (int i = 0; i < numberOfCUDAStreams; ++i)
         {
+
+            cudaMallocHost(&tmp_layers[gpuIndex][i], maxNumberOfLayers * sizeof(GPULayerHits));
+            cudaMallocHost(&tmp_layerDoublets[gpuIndex][i], maxNumberOfLayerPairs * sizeof(GPULayerDoublets));
+
             cudaStreamCreate (&streams[gpuIndex][i]);
         }
 
@@ -470,7 +484,8 @@ int main(int argc, char** argv)
 
 std::vector<unsigned int> processedEventsPerThread;
 processedEventsPerThread.resize(numberOfCPUThreads,0);
-
+		std::cout << "Execution run will start in 3 second.\n" << std::endl;
+		std::this_thread::sleep_for(std::chrono::seconds(3));
 double start = omp_get_wtime();
 #pragma omp parallel
     {
@@ -509,36 +524,47 @@ double start = omp_get_wtime();
 
                 for (unsigned int j = 0; j < h_allEvents[i].numberOfLayerPairs; ++j)
                 {
-                    h_doublets[h_firstLayerPairInEvt + j].indices =
+                    tmp_layerDoublets[gpuIndex][streamIndex][j] = h_doublets[h_firstLayerPairInEvt + j];
+                    tmp_layerDoublets[gpuIndex][streamIndex][j].indices =
                             &d_indices[gpuIndex][d_firstDoubletInEvent * 2
                                     + j * maxNumberOfDoublets * 2];
                     cudaMemcpyAsync(
                             &d_indices[gpuIndex][d_firstDoubletInEvent * 2
                                     + j * maxNumberOfDoublets * 2],
                             &h_indices[h_firstDoubletInEvent * 2 + j * maxNumberOfDoublets * 2],
-                            h_doublets[h_firstLayerPairInEvt + j].size * 2 * sizeof(int),
+                            tmp_layerDoublets[gpuIndex][streamIndex][j].size * 2 * sizeof(int),
                             cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
                 }
 
                 for (unsigned int j = 0; j < h_allEvents[i].numberOfLayers; ++j)
                 {
-                    h_layers[h_firstLayerInEvt + j].x = &d_x[gpuIndex][d_firstHitInEvent
-                            + maxNumberOfHits * j];
-                    h_layers[h_firstLayerInEvt + j].y = &d_y[gpuIndex][d_firstHitInEvent
-                            + maxNumberOfHits * j];
-                    h_layers[h_firstLayerInEvt + j].z = &d_z[gpuIndex][d_firstHitInEvent
-                            + maxNumberOfHits * j];
-                    cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].x,
+                    tmp_layers[gpuIndex][streamIndex][j]=h_layers[h_firstLayerInEvt + j];
+                    tmp_layers[gpuIndex][streamIndex][j].x=&d_x[gpuIndex][d_firstHitInEvent
+                                                                       + maxNumberOfHits * j];
+
+                    cudaMemcpyAsync(&d_x[gpuIndex][d_firstHitInEvent
+                                                   + maxNumberOfHits * j],
                             &h_x[h_firstHitInEvent + j * maxNumberOfHits],
-                            h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                            tmp_layers[gpuIndex][streamIndex][j].size * sizeof(float),
                             cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-                    cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].y,
+
+
+                    tmp_layers[gpuIndex][streamIndex][j].y = &d_y[gpuIndex][d_firstHitInEvent
+                            + maxNumberOfHits * j];
+                    cudaMemcpyAsync(&d_y[gpuIndex][d_firstHitInEvent
+                                                   + maxNumberOfHits * j],
                             &h_y[h_firstHitInEvent + j * maxNumberOfHits],
-                            h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                            tmp_layers[gpuIndex][streamIndex][j].size * sizeof(float),
                             cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-                    cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].z,
+
+
+                    tmp_layers[gpuIndex][streamIndex][j].z = &d_z[gpuIndex][d_firstHitInEvent
+                            + maxNumberOfHits * j];
+
+                    cudaMemcpyAsync(&d_z[gpuIndex][d_firstHitInEvent
+                                                   + maxNumberOfHits * j],
                             &h_z[h_firstHitInEvent + j * maxNumberOfHits],
-                            h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                            tmp_layers[gpuIndex][streamIndex][j].size * sizeof(float),
                             cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
                 }
 
@@ -548,11 +574,11 @@ double start = omp_get_wtime();
                         h_allEvents[i].numberOfRootLayerPairs * sizeof(unsigned int),
                         cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
                 cudaMemcpyAsync(&d_doublets[gpuIndex][d_firstLayerPairInEvt],
-                        &h_doublets[h_firstLayerPairInEvt],
+                        tmp_layerDoublets[gpuIndex][streamIndex],
                         h_allEvents[i].numberOfLayerPairs * sizeof(GPULayerDoublets),
                         cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
                 cudaMemcpyAsync(&d_layers[gpuIndex][d_firstLayerInEvt],
-                        &h_layers[h_firstLayerInEvt],
+                        tmp_layers[gpuIndex][streamIndex],
                         h_allEvents[i].numberOfLayers * sizeof(GPULayerHits),
                         cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
 
@@ -696,7 +722,8 @@ double stop = omp_get_wtime();
             cudaStreamSynchronize (streams[gpuIndex][i]);
 
             cudaStreamDestroy(streams[gpuIndex][i]);
-
+            cudaFreeHost(tmp_layers[gpuIndex][i]);
+            cudaFreeHost(tmp_layerDoublets[gpuIndex][i]);
         }
 
         cudaFree(device_isOuterHitOfCell[gpuIndex]);
