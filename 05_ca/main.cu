@@ -1,13 +1,16 @@
 #include <vector>
 #include <iostream>
 #include <assert.h>
+#include <tbb/concurrent_queue.h>
+#include <omp.h>
+
 #include "Event.h"
 #include "GPUHitsAndDoublets.h"
 #include "GPUCACell.h"
 #include "parser.h"
 #include "cuda.h"
 #include "kernels.h"
-
+#include "host_kernels.h"
 static void show_usage(std::string name)
 {
     std::cerr << "\nUsage: " << name << " <option(s)>" << " Options:\n"
@@ -31,6 +34,8 @@ int main(int argc, char** argv)
     std::string inputFile = "../input/parsed_noPU_fix.txt";
     unsigned int numberOfCUDAStreams = 5;
     unsigned int numberOfEventsPerStreamPerIteration = 1;
+    unsigned int numberOfIterations = 1;
+    unsigned int numberOfCPUThreads = 1;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -76,6 +81,36 @@ int main(int argc, char** argv)
                 i++;
                 std::istringstream ss(argv[i]);
                 if (!(ss >> numberOfCUDAStreams))
+                {
+                    std::cerr << "Invalid number " << argv[i] << '\n';
+                    exit(1);
+
+                }
+            }
+        }
+
+        else if (arg == "-t")
+        {
+            if (i + 1 < argc) // Make sure we aren't at the end of argv!
+            {
+                i++;
+                std::istringstream ss(argv[i]);
+                if (!(ss >> numberOfIterations))
+                {
+                    std::cerr << "Invalid number " << argv[i] << '\n';
+                    exit(1);
+
+                }
+            }
+        }
+
+        else if (arg == "-j")
+        {
+            if (i + 1 < argc) // Make sure we aren't at the end of argv!
+            {
+                i++;
+                std::istringstream ss(argv[i]);
+                if (!(ss >> numberOfCPUThreads))
                 {
                     std::cerr << "Invalid number " << argv[i] << '\n';
                     exit(1);
@@ -306,6 +341,31 @@ int main(int argc, char** argv)
 
     cudaGetDeviceCount(&nGPUs);
     std::cout << "Number of available GPUs " << nGPUs << std::endl;
+    std::cout << "Using " << numberOfCPUThreads << " CPU threads " << std::endl;
+
+    omp_set_num_threads(numberOfCPUThreads);
+    unsigned int numberOfCPUOnlyThreads = numberOfCPUThreads - nGPUs;
+    // HOST WORKER ALLOCATIONS
+
+    std::vector<std::vector<GPUCACell> > hostWorker_theCells;
+    hostWorker_theCells.resize(numberOfCPUOnlyThreads);
+    std::vector<std::vector<GPUSimpleVector<maxCellsPerHit, unsigned int> > > hostWorker_isOuterHitOfCell;
+    hostWorker_isOuterHitOfCell.resize(numberOfCPUOnlyThreads);
+    std::vector<GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> > hostWorker_foundNtuplets;
+    hostWorker_foundNtuplets.resize(numberOfCPUOnlyThreads);
+
+
+
+
+    for(int i = 0; i <numberOfCPUOnlyThreads;++i )
+    {
+        hostWorker_theCells[i].resize(maxNumberOfLayerPairs * maxNumberOfDoublets);
+        hostWorker_isOuterHitOfCell[i].resize(maxNumberOfLayers * maxNumberOfHits);
+
+
+
+    }
+
 
     //GPU ALLOCATIONS
     std::cout << "preallocating memory on GPU " << std::endl;
@@ -337,6 +397,9 @@ int main(int argc, char** argv)
     std::vector<GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> *> d_foundNtuplets;
     d_foundNtuplets.resize(nGPUs);
 
+
+
+
     for (unsigned int gpuIndex = 0; gpuIndex < nGPUs; ++gpuIndex)
     {
         cudaSetDevice(gpuIndex);
@@ -361,19 +424,12 @@ int main(int argc, char** argv)
         cudaMalloc(&d_rootLayerPairs[gpuIndex],
                 eventsPreallocatedOnGPU * maxNumberOfRootLayerPairs * sizeof(unsigned int));
         //////////////////////////////////////////////////////////
-        // ALLOCATIONS FOR THE INTERMEDIATE RESULTS (STAYS ON GPU)
+        // ALLOCATIONS FOR THE INTERMEDIATE RESULTS (STAYS ON WORKER)
         //////////////////////////////////////////////////////////
 
         cudaMalloc(&device_theCells[gpuIndex],
                 eventsPreallocatedOnGPU * maxNumberOfLayerPairs * maxNumberOfDoublets
                         * sizeof(GPUCACell));
-        //////////////////////////////////////////////////////////
-        // ALLOCATIONS FOR THE RESULTS (STAYS ON GPU)
-        //////////////////////////////////////////////////////////
-
-        cudaMalloc(&d_foundNtuplets[gpuIndex],
-                eventsPreallocatedOnGPU
-                        * sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ));
 
         cudaMalloc(&device_isOuterHitOfCell[gpuIndex],
                 eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits
@@ -382,6 +438,15 @@ int main(int argc, char** argv)
         cudaMemset(device_isOuterHitOfCell[gpuIndex], 0,
                 eventsPreallocatedOnGPU * maxNumberOfLayers * maxNumberOfHits
                         * sizeof(GPUSimpleVector<maxCellsPerHit, unsigned int> ));
+        //////////////////////////////////////////////////////////
+        // ALLOCATIONS FOR THE RESULTS
+        //////////////////////////////////////////////////////////
+
+        cudaMalloc(&d_foundNtuplets[gpuIndex],
+                eventsPreallocatedOnGPU
+                        * sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ));
+
+
 
         streams[gpuIndex].resize(numberOfCUDAStreams);
         for (int i = 0; i < numberOfCUDAStreams; ++i)
@@ -393,122 +458,236 @@ int main(int argc, char** argv)
 
     //INITIALIZATION IS NOW OVER
     //HERE STARTS THE COMPUTATION
-    for (unsigned iteration = 0; iteration < 50; iteration++)
+
+    tbb::concurrent_queue<unsigned int> queue;
+    for (unsigned iteration = 0; iteration < numberOfIterations; iteration++)
     {
         for (unsigned int i = 0; i < nEvents; ++i)
         {
-            unsigned int gpuIndex = i % nGPUs;
+            queue.push(i);
+        }
+    }
 
-//        unsigned int i =1;
-            unsigned int streamIndex = (i / nGPUs) % numberOfCUDAStreams;
-//        unsigned int streamIndex =1;
-            cudaSetDevice(gpuIndex);
+std::vector<unsigned int> processedEventsPerThread;
+processedEventsPerThread.resize(numberOfCPUThreads,0);
 
-            auto d_firstLayerPairInEvt = maxNumberOfLayerPairs * streamIndex;
-            auto d_firstLayerInEvt = maxNumberOfLayers * streamIndex;
-            auto d_firstDoubletInEvent = d_firstLayerPairInEvt * maxNumberOfDoublets;
-            auto d_firstHitInEvent = d_firstLayerInEvt * maxNumberOfHits;
+double start = omp_get_wtime();
+#pragma omp parallel
+    {
+        unsigned int streamIndex = 0;
+        int threadId = omp_get_thread_num();
+        unsigned int gpuIndex;
+        bool isGPUThread = false;
+        if (threadId < nGPUs)
+        {
+            gpuIndex = threadId;
+            isGPUThread = true;
+        }
 
-            auto h_firstLayerPairInEvt = maxNumberOfLayerPairs * i;
-            auto h_firstLayerInEvt = maxNumberOfLayers * i;
-            auto h_firstDoubletInEvent = h_firstLayerPairInEvt * maxNumberOfDoublets;
-            auto h_firstHitInEvent = h_firstLayerInEvt * maxNumberOfHits;
 
-            for (unsigned int j = 0; j < h_allEvents[i].numberOfLayerPairs; ++j)
+        if (isGPUThread)
+        {
+            while (!queue.empty())
             {
-                h_doublets[h_firstLayerPairInEvt + j].indices =
-                        &d_indices[gpuIndex][d_firstDoubletInEvent * 2 + j * maxNumberOfDoublets * 2];
+
+                cudaSetDevice(gpuIndex);
+                streamIndex = (streamIndex + 1) % numberOfCUDAStreams;
+                cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
+                unsigned int i;
+                queue.try_pop(i);
+                processedEventsPerThread[threadId]++;
+
+                auto d_firstLayerPairInEvt = maxNumberOfLayerPairs * streamIndex;
+                auto d_firstLayerInEvt = maxNumberOfLayers * streamIndex;
+                auto d_firstDoubletInEvent = d_firstLayerPairInEvt * maxNumberOfDoublets;
+                auto d_firstHitInEvent = d_firstLayerInEvt * maxNumberOfHits;
+
+                auto h_firstLayerPairInEvt = maxNumberOfLayerPairs * i;
+                auto h_firstLayerInEvt = maxNumberOfLayers * i;
+                auto h_firstDoubletInEvent = h_firstLayerPairInEvt * maxNumberOfDoublets;
+                auto h_firstHitInEvent = h_firstLayerInEvt * maxNumberOfHits;
+
+                for (unsigned int j = 0; j < h_allEvents[i].numberOfLayerPairs; ++j)
+                {
+                    h_doublets[h_firstLayerPairInEvt + j].indices =
+                            &d_indices[gpuIndex][d_firstDoubletInEvent * 2
+                                    + j * maxNumberOfDoublets * 2];
+                    cudaMemcpyAsync(
+                            &d_indices[gpuIndex][d_firstDoubletInEvent * 2
+                                    + j * maxNumberOfDoublets * 2],
+                            &h_indices[h_firstDoubletInEvent * 2 + j * maxNumberOfDoublets * 2],
+                            h_doublets[h_firstLayerPairInEvt + j].size * 2 * sizeof(int),
+                            cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
+                }
+
+                for (unsigned int j = 0; j < h_allEvents[i].numberOfLayers; ++j)
+                {
+                    h_layers[h_firstLayerInEvt + j].x = &d_x[gpuIndex][d_firstHitInEvent
+                            + maxNumberOfHits * j];
+                    h_layers[h_firstLayerInEvt + j].y = &d_y[gpuIndex][d_firstHitInEvent
+                            + maxNumberOfHits * j];
+                    h_layers[h_firstLayerInEvt + j].z = &d_z[gpuIndex][d_firstHitInEvent
+                            + maxNumberOfHits * j];
+                    cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].x,
+                            &h_x[h_firstHitInEvent + j * maxNumberOfHits],
+                            h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                            cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
+                    cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].y,
+                            &h_y[h_firstHitInEvent + j * maxNumberOfHits],
+                            h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                            cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
+                    cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].z,
+                            &h_z[h_firstHitInEvent + j * maxNumberOfHits],
+                            h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                            cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
+                }
+
                 cudaMemcpyAsync(
-                        &d_indices[gpuIndex][d_firstDoubletInEvent * 2 + j * maxNumberOfDoublets * 2],
-                        &h_indices[h_firstDoubletInEvent * 2 + j * maxNumberOfDoublets * 2],
-                        h_doublets[h_firstLayerPairInEvt + j].size * 2 * sizeof(int),
+                        &d_rootLayerPairs[gpuIndex][maxNumberOfRootLayerPairs * streamIndex],
+                        &h_rootLayerPairs[maxNumberOfRootLayerPairs * i],
+                        h_allEvents[i].numberOfRootLayerPairs * sizeof(unsigned int),
                         cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-            }
-
-            for (unsigned int j = 0; j < h_allEvents[i].numberOfLayers; ++j)
-            {
-                h_layers[h_firstLayerInEvt + j].x = &d_x[gpuIndex][d_firstHitInEvent
-                        + maxNumberOfHits * j];
-                h_layers[h_firstLayerInEvt + j].y = &d_y[gpuIndex][d_firstHitInEvent
-                        + maxNumberOfHits * j];
-                h_layers[h_firstLayerInEvt + j].z = &d_z[gpuIndex][d_firstHitInEvent
-                        + maxNumberOfHits * j];
-                cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].x,
-                        &h_x[h_firstHitInEvent + j * maxNumberOfHits],
-                        h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                cudaMemcpyAsync(&d_doublets[gpuIndex][d_firstLayerPairInEvt],
+                        &h_doublets[h_firstLayerPairInEvt],
+                        h_allEvents[i].numberOfLayerPairs * sizeof(GPULayerDoublets),
                         cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-                cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].y,
-                        &h_y[h_firstHitInEvent + j * maxNumberOfHits],
-                        h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+                cudaMemcpyAsync(&d_layers[gpuIndex][d_firstLayerInEvt],
+                        &h_layers[h_firstLayerInEvt],
+                        h_allEvents[i].numberOfLayers * sizeof(GPULayerHits),
                         cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-                cudaMemcpyAsync(h_layers[h_firstLayerInEvt + j].z,
-                        &h_z[h_firstHitInEvent + j * maxNumberOfHits],
-                        h_layers[h_firstLayerInEvt + j].size * sizeof(float),
+
+                cudaMemcpyAsync(&d_events[gpuIndex][streamIndex], &h_allEvents[i], sizeof(GPUEvent),
                         cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-            }
 
-            cudaMemcpyAsync(&d_rootLayerPairs[gpuIndex][maxNumberOfRootLayerPairs * streamIndex],
-                    &h_rootLayerPairs[maxNumberOfRootLayerPairs * i],
-                    h_allEvents[i].numberOfRootLayerPairs * sizeof(unsigned int),
-                    cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-            cudaMemcpyAsync(&d_doublets[gpuIndex][d_firstLayerPairInEvt],
-                    &h_doublets[h_firstLayerPairInEvt],
-                    h_allEvents[i].numberOfLayerPairs * sizeof(GPULayerDoublets),
-                    cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-            cudaMemcpyAsync(&d_layers[gpuIndex][d_firstLayerInEvt], &h_layers[h_firstLayerInEvt],
-                    h_allEvents[i].numberOfLayers * sizeof(GPULayerHits), cudaMemcpyHostToDevice,
-                    streams[gpuIndex][streamIndex]);
-
-            cudaMemcpyAsync(&d_events[gpuIndex][streamIndex], &h_allEvents[i], sizeof(GPUEvent),
-                    cudaMemcpyHostToDevice, streams[gpuIndex][streamIndex]);
-
-            dim3 numberOfBlocks_create(32, h_allEvents[i].numberOfLayerPairs);
-            dim3 numberOfBlocks_connect(16, h_allEvents[i].numberOfLayerPairs);
-            dim3 numberOfBlocks_find(8, h_allEvents[i].numberOfRootLayerPairs);
+                dim3 numberOfBlocks_create(32, h_allEvents[i].numberOfLayerPairs);
+                dim3 numberOfBlocks_connect(16, h_allEvents[i].numberOfLayerPairs);
+                dim3 numberOfBlocks_find(8, h_allEvents[i].numberOfRootLayerPairs);
 // KERNELS
 //        debug_input_data<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex], &d_doublets[d_firstLayerPairInEvt], &d_layers[d_firstLayerInEvt],d_regionParams,  maxNumberOfHits );
-            kernel_create<<<numberOfBlocks_create,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex], &d_doublets[gpuIndex][d_firstLayerPairInEvt],
-                    &d_layers[gpuIndex][d_firstLayerInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
-                    &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], &d_foundNtuplets[gpuIndex][streamIndex],d_regionParams[gpuIndex], maxNumberOfDoublets, maxNumberOfHits);
+                kernel_create<<<numberOfBlocks_create,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex], &d_doublets[gpuIndex][d_firstLayerPairInEvt],
+                        &d_layers[gpuIndex][d_firstLayerInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
+                        &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], &d_foundNtuplets[gpuIndex][streamIndex],d_regionParams[gpuIndex], maxNumberOfDoublets, maxNumberOfHits);
 
 ////
 //        kernel_debug<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex], &d_doublets[d_firstLayerPairInEvt],
 //                &d_layers[d_firstLayerInEvt], &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets],
 //                &device_isOuterHitOfCell[d_firstHitInEvent], &d_foundNtuplets[streamIndex],
 //                d_regionParams, theThetaCut, thePhiCut,theHardPtCut,maxNumberOfDoublets, maxNumberOfHits);
-            kernel_connect<<<numberOfBlocks_connect,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
-                    &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
-                    &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], d_regionParams[gpuIndex], theThetaCut, thePhiCut,
-                    theHardPtCut, maxNumberOfDoublets, maxNumberOfHits);
+                kernel_connect<<<numberOfBlocks_connect,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
+                        &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
+                        &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], d_regionParams[gpuIndex], theThetaCut, thePhiCut,
+                        theHardPtCut, maxNumberOfDoublets, maxNumberOfHits);
 
 //        kernel_debug_connect<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex], &d_doublets[d_firstLayerPairInEvt],
 //                &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets], &device_isOuterHitOfCell[d_firstHitInEvent],
 //                 d_regionParams, maxNumberOfDoublets, maxNumberOfHits);
 //        cudaMemsetAsync(&d_foundNtuplets[streamIndex], 0, sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ), streams[streamIndex]);
 
-            kernel_find_ntuplets<<<numberOfBlocks_find,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
-                    &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
-                    &d_foundNtuplets[gpuIndex][streamIndex],&d_rootLayerPairs[gpuIndex][maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
+                kernel_find_ntuplets<<<numberOfBlocks_find,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
+                        &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
+                        &d_foundNtuplets[gpuIndex][streamIndex],&d_rootLayerPairs[gpuIndex][maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
 
 //        kernel_debug_find_ntuplets<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex],
 //                &d_doublets[d_firstLayerPairInEvt], &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets],
 //                &d_foundNtuplets[streamIndex],&d_rootLayerPairs[maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
-            cudaMemcpyAsync(&h_foundNtuplets[streamIndex], &d_foundNtuplets[gpuIndex][streamIndex],
-                    sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ),
-                    cudaMemcpyDeviceToHost, streams[gpuIndex][streamIndex]);
-            cudaMemsetAsync(&device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], 0,
-                    maxNumberOfLayers * maxNumberOfHits
-                            * sizeof(GPUSimpleVector<maxCellsPerHit, unsigned int> ),
-                    streams[gpuIndex][streamIndex]);
+                cudaMemcpyAsync(&h_foundNtuplets[streamIndex],
+                        &d_foundNtuplets[gpuIndex][streamIndex],
+                        sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ),
+                        cudaMemcpyDeviceToHost, streams[gpuIndex][streamIndex]);
+                cudaMemsetAsync(&device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], 0,
+                        maxNumberOfLayers * maxNumberOfHits
+                                * sizeof(GPUSimpleVector<maxCellsPerHit, unsigned int> ),
+                        streams[gpuIndex][streamIndex]);
 
 //        cudaStreamSynchronize(streams[streamIndex]);
 //        std::cout << "found quadruplets " << h_foundNtuplets[streamIndex].size() << std::endl;
 
-// COPY OF THE RESULTS
+            }
+
+            for (int i = 0; i < numberOfCUDAStreams; ++i)
+            {
+                cudaStreamSynchronize (streams[gpuIndex][i]);
+            }
+
         }
+        else
+        {
+            int CPUOnlyThreadId = threadId - nGPUs;
+
+            while (!queue.empty())
+            {
+                unsigned int i;
+                queue.try_pop(i);
+                processedEventsPerThread[threadId]++;
+
+                auto h_firstLayerPairInEvt = maxNumberOfLayerPairs * i;
+                auto h_firstLayerInEvt = maxNumberOfLayers * i;
+                auto h_firstDoubletInEvent = h_firstLayerPairInEvt * maxNumberOfDoublets;
+                auto h_firstHitInEvent = h_firstLayerInEvt * maxNumberOfHits;
+                std::vector<GPULayerDoublets> doublets;
+                doublets.resize(h_allEvents[i].numberOfLayerPairs);
+
+
+                for (unsigned int j = 0; j < h_allEvents[i].numberOfLayerPairs; ++j)
+                {
+                    doublets[j] = h_doublets[h_firstLayerPairInEvt + j];
+                    doublets[j].indices =&h_indices[h_firstDoubletInEvent* 2 + j * maxNumberOfDoublets * 2];
+
+                }
+
+                std::vector<GPULayerHits> layerHits;
+                layerHits.resize(h_allEvents[i].numberOfLayers);
+                for (unsigned int j = 0; j < h_allEvents[i].numberOfLayers; ++j)
+                {
+                    layerHits[j] = h_layers[h_firstLayerInEvt + j];
+                    layerHits[j].x=&h_x[h_firstHitInEvent + j * maxNumberOfHits];
+                    layerHits[j].y=&h_y[h_firstHitInEvent + j * maxNumberOfHits];
+                    layerHits[j].z=&h_z[h_firstHitInEvent + j * maxNumberOfHits];
+
+                }
+
+                host_kernel(&h_allEvents[i], doublets.data(),
+                        layerHits.data(),
+                        hostWorker_theCells[CPUOnlyThreadId],
+                        hostWorker_isOuterHitOfCell[CPUOnlyThreadId], &h_rootLayerPairs[maxNumberOfRootLayerPairs * i], &hostWorker_foundNtuplets[CPUOnlyThreadId],
+                        h_regionParams, theThetaCut, thePhiCut, theHardPtCut, maxNumberOfDoublets,
+                        maxNumberOfHits);
+                for(unsigned int j = 0; j < hostWorker_isOuterHitOfCell[CPUOnlyThreadId].size(); ++j)
+                {
+                    hostWorker_isOuterHitOfCell[CPUOnlyThreadId][j].reset();
+                }
+
+            }
+        }
+
     }
 
-    // CLEANUP
+
+double stop = omp_get_wtime();
+
+    std::cout << "Summary: " << std::endl;
+    unsigned int processedByGPU = 0;
+    unsigned int processedByCPU = 0;
+
+    for(unsigned int i = 0; i< processedEventsPerThread.size(); ++i)
+    {
+        std::cout << "\tthread " << i << " processed " << processedEventsPerThread[i] << " events." << std::endl;
+
+        if(i < nGPUs)
+            processedByGPU+=processedEventsPerThread[i];
+        else
+            processedByCPU+=processedEventsPerThread[i];
+    }
+
+    std::cout << numberOfIterations*nEvents << " events processed in " << stop-start << "s. Measured rate: " << numberOfIterations*nEvents/(stop-start) << " Hz " << std::endl;
+    std::cout << processedByGPU << " events processed by " << nGPUs << " GPUs in  " << stop-start << "s. Measured GPU rate: " << processedByGPU/(stop-start) << " Hz " << std::endl;
+    std::cout << processedByCPU << " events processed by " << numberOfCPUOnlyThreads << " CPUs in  " << stop-start << "s. Measured CPU rate: " << processedByCPU/(stop-start) << " Hz " << std::endl;
+
+// CLEANUP
+
+
+    std::cout << "deleting Device memory " << std::endl;
+
     for (unsigned int gpuIndex = 0; gpuIndex < nGPUs; ++gpuIndex)
     {
         cudaSetDevice(gpuIndex);
@@ -536,6 +715,8 @@ int main(int argc, char** argv)
         cudaFree(d_rootLayerPairs[gpuIndex]);
 
     }
+    std::cout << "deleting Host memory " << std::endl;
+
     cudaFreeHost(h_foundNtuplets);
     cudaFreeHost(h_regionParams);
     cudaFreeHost(h_allEvents);
@@ -546,6 +727,9 @@ int main(int argc, char** argv)
     cudaFreeHost(h_rootLayerPairs);
     cudaFreeHost(h_indices);
     cudaFreeHost(h_doublets);
+
+
+
     return 0;
 }
 
