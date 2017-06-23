@@ -4,7 +4,8 @@
 template<int maxSize, class T>
 struct GPUSimpleVector
 {
-	__inline__ __device__
+	__inline__
+    __host__ __device__
 	int push_back(const T& element)
 	{
 
@@ -38,7 +39,8 @@ struct GPUSimpleVector
 		}
 	}
 
-	__inline__ __device__
+	__inline__
+    __host__ __device__
 	T pop_back()
 	{
 		if(m_size > 0)
