@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+from keras.utils.np_utils import to_categorical
 
 
 datalabs = ["run", "evt", "detSeqIn", "detSeqOut", "inZ", "inX", "inY", "outZ",
@@ -64,13 +65,16 @@ class Dataset:
     """ Load the dataset from txt files. """
     def __init__(self, fname, delimit='\t'):
         with open(fname, 'rb') as f:
-            data = np.genfromtxt(f, delimiter=delimit, dtype=np.float32)
+            data = np.load(f)
+            # Compressed files return a dictionary
+            if type(data) != np.ndarray:
+                data = data['arr_0']
             self.data = pd.DataFrame(data, columns=datalabs)
 
     def get_hit_rectangle(self):
         """ Returns hits clusters data for Adriano's model. """
         a = self.data[inhitlabs + outhitlabs].as_matrix()
-        return a
+        return a.reshape((-1, 8, 8, 2))
 
     def get_hit_shapes(self, normalize=True):
         """ Return hit shape features
@@ -95,11 +99,16 @@ class Dataset:
 
     def get_info_features(self):
         """ Returns info features as numpy array. """
-        return self.data[featurelabs]
+        return self.data[featurelabs].as_matrix()
 
     def get_labels(self):
         return self.data["pdgId"].as_matrix() != 0.0
 
+    def get_data(self):
+        X_hit = self.get_hit_rectangle()
+        X_info = self.get_info_features()
+        y = to_categorical(self.get_labels())
+        return X_hit, X_info, y
 
 if __name__ == '__main__':
     d = Dataset('data/1_1_5_dataset.txt')
