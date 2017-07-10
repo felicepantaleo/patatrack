@@ -4,6 +4,7 @@ from sklearn.preprocessing import StandardScaler
 from keras.utils.np_utils import to_categorical
 
 
+target_lab = "pdgId"
 datalabs = ["run", "evt", "detSeqIn", "detSeqOut", "inZ", "inX", "inY", "outZ",
             "outX", "outY", "detCounterIn", "detCounterOut", "isBarrelIn", "isBarrelOut",
             "layerIn", "ladderIn", "moduleIn", "sideIn", "diskIn", "panelIn", "bladeIn",
@@ -71,11 +72,6 @@ class Dataset:
                 data = data['arr_0']
             self.data = pd.DataFrame(data, columns=datalabs)
 
-    def get_hit_rectangle(self):
-        """ Returns hits clusters data for Adriano's model. """
-        a = self.data[inhitlabs + outhitlabs].as_matrix()
-        return a.reshape((-1, 8, 8, 2))
-
     def get_hit_shapes(self, normalize=True):
         """ Return hit shape features
         Args:
@@ -102,13 +98,34 @@ class Dataset:
         return self.data[featurelabs].as_matrix()
 
     def get_labels(self):
-        return self.data["pdgId"].as_matrix() != 0.0
+        return self.data[target_lab].as_matrix() != 0.0
 
     def get_data(self):
-        X_hit = self.get_hit_rectangle()
+        X_hit = self.get_hit_shapes()
         X_info = self.get_info_features()
         y = to_categorical(self.get_labels())
         return X_hit, X_info, y
+
+    def save(self, fname):
+        np.save(fname, self.data.as_matrix())
+
+    def balance_data(self, max_ratio=0.5, verbose=True):
+        """ Balance the data. """ 
+        data_neg = self.data[self.data[target_lab] == 0.0]
+        data_pos = self.data[self.data[target_lab] != 0.0]
+
+        n_pos = data_pos.shape[0]
+        n_neg = data_neg.shape[0]
+        if verbose:
+            print("Number of negatives: " + str(n_neg))
+            print("Number of positive: " + str(n_pos))
+            print("ratio: " + str(n_neg / n_pos))
+        
+        data_neg = data_neg.sample(n_pos)
+        balanced_data = pd.concat([data_neg, data_pos])
+        balanced_data = balanced_data.sample(frac=1)  # Shuffle the dataset again
+        self.data = balanced_data
+
 
 if __name__ == '__main__':
     d = Dataset('data/1_1_5_dataset.txt')
