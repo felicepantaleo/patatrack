@@ -1,6 +1,12 @@
 """
 Doublet model with hit shapes and info features.
 """
+import socket
+
+if socket.gethostname() == 'cmg-gpu1080':
+    print('locking only one GPU.')
+    import setGPU
+
 import argparse
 import keras
 import dataset
@@ -17,27 +23,28 @@ from keras.constraints import max_norm
 from keras.callbacks import EarlyStopping, ModelCheckpoint, TensorBoard
 
 
-DEBUG = os.name == 'nt'  # DEBUG always False for server
+DEBUG = os.name == 'nt'  # DEBUG on laptop
 if DEBUG:
     print("DEBUG mode")
 
+t_now = '{0:%Y-%m-%d_%H-%M-%S}'.format(datetime.datetime.now())
 # Model configuration
 parser = argparse.ArgumentParser()
-parser.add_argument('--n_epochs', type=int, default=50 if not DEBUG else 3,
+parser.add_argument('--n_epochs', type=int, default=10 if not DEBUG else 3,
                     help='number of epochs')
-parser.add_argument('--batch_size', type=int, default=32)
+parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--dropout', type=float, default=0.5)
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--patience', type=int, default=5)
+parser.add_argument('--name', type=str, default='model_' + t_now)
 args = parser.parse_args()
 
 
-t_now = '{0:%Y-%m-%d_%H-%M-%S}'.format(datetime.datetime.now())
 log_dir = "models/cnn_doublet/run_" + t_now
 remote_data = '/eos/cms/store/cmst3/group/dehep/convPixels/clean/' 
 
 print("Loading data...")
-data_dir = '/data/ml/acarta/data/' if os.name != 'nt' else 'data/'
+data_dir = 'data/'
 train_fname = data_dir + 'train_balanced.npz' if not DEBUG else 'data/debug.npy'
 val_fname = data_dir + 'val.npz' if not DEBUG else 'data/debug.npy'
 test_fname = data_dir + 'test.npz' if not DEBUG else 'data/debug.npy'
@@ -61,6 +68,7 @@ pool = MaxPooling2D(pool_size=(2, 2), padding='same', data_format="channels_last
 conv = Conv2D(64, (3, 3), activation='relu', padding='same', data_format="channels_last", name='conv3')(pool)
 conv = Conv2D(64, (3, 3), activation='relu', padding='same', data_format="channels_last", name='conv4')(conv)
 pool = MaxPooling2D(pool_size=(2, 2), padding='same', data_format="channels_last", name='pool2')(conv)
+
 
 flat = Flatten()(pool)
 #info_drop = Dropout(infos)
@@ -94,7 +102,7 @@ loss, acc = model.evaluate([X_test_hit, X_test_info], y_test, batch_size=128)
 print('Test loss / test accuracy = {:.4f} / {:.4f}'.format(loss, acc))
 
 
-fname = "models/cnn_doublet/model_" + t_now
+fname = "models/cnn_doublet/" + args.name 
 model.save_weights(fname + ".h5", overwrite=True)
 with open(fname + ".json", "w") as outfile:
     json.dump(model.to_json(), outfile)
