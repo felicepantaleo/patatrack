@@ -19,6 +19,7 @@ from dataset import Dataset
 from keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, concatenate, Reshape, Dropout
 from keras.models import Model
 from keras.utils.np_utils import to_categorical
+from keras import optimizers
 from keras.constraints import max_norm
 from keras.callbacks import EarlyStopping, ModelCheckpoint, TensorBoard
 
@@ -35,10 +36,12 @@ parser.add_argument('--n_epochs', type=int, default=10 if not DEBUG else 3,
 parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--dropout', type=float, default=0.5)
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-parser.add_argument('--patience', type=int, default=5)
+parser.add_argument('--momentum', type=float, default=0.9)
+parser.add_argument('--patience', type=int, default=15)
 parser.add_argument('--log_dir', type=str, default="models/cnn_doublet")
 parser.add_argument('--name', type=str, default='model_' + t_now)
 parser.add_argument('--maxnorm', type=float, default=2.)
+parser.add_argument('--verbose', type=int, default=1)
 args = parser.parse_args()
 
 log_dir_tf = args.log_dir + '/' + args.name
@@ -80,25 +83,27 @@ drop = Dropout(args.dropout)(dense)
 pred = Dense(2, activation='softmax', kernel_constraint=max_norm(args.maxnorm), name='output')(drop)
 
 model = Model(inputs=[hit_shapes, infos], outputs=pred)
-model.compile(optimizer='sgd', loss='categorical_crossentropy', metrics=['accuracy'])
+my_sgd = optimizers.SGD(lr=args.lr, decay=1e-6, momentum=args.momentum, nesterov=True)
+model.compile(optimizer=my_sgd, loss='categorical_crossentropy', metrics=['accuracy'])
 
-model.summary()
+if args.verbose:
+    model.summary()
 
 print('Training')
 # Save the best model during validation and bail out of training early if we're not improving
 _, tmpfn = tempfile.mkstemp()
 callbacks = [
-    EarlyStopping(patience=args.patience), 
+    EarlyStopping(monitor='val_loss', patience=args.patience), 
     ModelCheckpoint(tmpfn, save_best_only=True, save_weights_only=True), 
     TensorBoard(log_dir=log_dir_tf, histogram_freq=0, write_graph=True, write_images=True)
 ]
 model.fit([X_hit, X_info], y, batch_size=args.batch_size, epochs=args.n_epochs, 
-    validation_data=([X_val_hit, X_val_info], y_val), callbacks=callbacks)
+    validation_data=([X_val_hit, X_val_info], y_val), callbacks=callbacks, verbose=args.verbose)
 
 # Restore the best found model during validation
 model.load_weights(tmpfn)
 
-loss, acc = model.evaluate([X_test_hit, X_test_info], y_test, batch_size=128)
+loss, acc = model.evaluate([X_test_hit, X_test_info], y_test, batch_size=args.batch_size)
 print('Test loss / test accuracy = {:.4f} / {:.4f}'.format(loss, acc))
 
 
