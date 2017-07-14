@@ -36,18 +36,19 @@ parser.add_argument('--batch_size', type=int, default=128)
 parser.add_argument('--dropout', type=float, default=0.5)
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--patience', type=int, default=5)
+parser.add_argument('--log_dir', type=str, default="models/cnn_doublet")
 parser.add_argument('--name', type=str, default='model_' + t_now)
+parser.add_argument('--maxnorm', type=float, default=2.)
 args = parser.parse_args()
 
-
-log_dir = "models/cnn_doublet/run_" + t_now
+log_dir_tf = args.log_dir + '/' + args.name
 remote_data = '/eos/cms/store/cmst3/group/dehep/convPixels/clean/' 
 
 print("Loading data...")
 data_dir = 'data/'
-train_fname = data_dir + 'train_balanced.npz' if not DEBUG else 'data/debug.npy'
-val_fname = data_dir + 'val.npz' if not DEBUG else 'data/debug.npy'
-test_fname = data_dir + 'test.npz' if not DEBUG else 'data/debug.npy'
+train_fname = data_dir + 'train_balanced.npy' if not DEBUG else 'data/debug.npy'
+val_fname = data_dir + 'val.npy' if not DEBUG else 'data/debug.npy'
+test_fname = data_dir + 'test.npy' if not DEBUG else 'data/debug.npy'
 
 train_data = Dataset(train_fname)
 val_data = Dataset(val_fname)
@@ -74,12 +75,12 @@ flat = Flatten()(pool)
 #info_drop = Dropout(infos)
 concat = concatenate([flat, infos])
 
-dense = Dense(64, activation='relu', kernel_constraint=max_norm(2.), name='dense')(concat)
+dense = Dense(64, activation='relu', kernel_constraint=max_norm(args.maxnorm), name='dense')(concat)
 drop = Dropout(args.dropout)(dense)
-pred = Dense(2, activation='softmax', kernel_constraint=max_norm(2.), name='output')(drop)
+pred = Dense(2, activation='softmax', kernel_constraint=max_norm(args.maxnorm), name='output')(drop)
 
 model = Model(inputs=[hit_shapes, infos], outputs=pred)
-model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+model.compile(optimizer='sgd', loss='categorical_crossentropy', metrics=['accuracy'])
 
 model.summary()
 
@@ -89,12 +90,11 @@ _, tmpfn = tempfile.mkstemp()
 callbacks = [
     EarlyStopping(patience=args.patience), 
     ModelCheckpoint(tmpfn, save_best_only=True, save_weights_only=True), 
-    TensorBoard(log_dir=log_dir, histogram_freq=0, write_graph=True, write_images=True)
+    TensorBoard(log_dir=log_dir_tf, histogram_freq=0, write_graph=True, write_images=True)
 ]
 model.fit([X_hit, X_info], y, batch_size=args.batch_size, epochs=args.n_epochs, 
     validation_data=([X_val_hit, X_val_info], y_val), callbacks=callbacks)
 
-# TODO: should really restore the checkpoint!
 # Restore the best found model during validation
 model.load_weights(tmpfn)
 
@@ -102,10 +102,9 @@ loss, acc = model.evaluate([X_test_hit, X_test_info], y_test, batch_size=128)
 print('Test loss / test accuracy = {:.4f} / {:.4f}'.format(loss, acc))
 
 
-fname = "models/cnn_doublet/" + args.name 
+fname = args.log_dir + "/" + args.name 
+print("saving model " + fname)
 model.save_weights(fname + ".h5", overwrite=True)
 with open(fname + ".json", "w") as outfile:
     json.dump(model.to_json(), outfile)
-
-# del model  # deletes the existing model
 

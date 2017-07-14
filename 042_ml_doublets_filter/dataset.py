@@ -67,7 +67,7 @@ class Dataset:
     def __init__(self, fname, delimit='\t'):
         with open(fname, 'rb') as f:
             data = np.load(f)
-            # Compressed files return a dictionary
+            # Compressed .npz files return a dictionary
             if type(data) != np.ndarray:
                 data = data['arr_0']
             self.data = pd.DataFrame(data, columns=datalabs)
