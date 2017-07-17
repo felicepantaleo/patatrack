@@ -49,13 +49,13 @@ remote_data = '/eos/cms/store/cmst3/group/dehep/convPixels/clean/'
 
 print("Loading data...")
 data_dir = 'data/'
-train_fname = data_dir + 'train_balanced.npy' if not DEBUG else 'data/debug.npy'
+train_fname = data_dir + 'train.npy' if not DEBUG else 'data/debug.npy'
 val_fname = data_dir + 'val.npy' if not DEBUG else 'data/debug.npy'
 test_fname = data_dir + 'test.npy' if not DEBUG else 'data/debug.npy'
 
-train_data = Dataset(train_fname)
-val_data = Dataset(val_fname)
-test_data = Dataset(test_fname)
+train_data = Dataset(train_fname).filter('isFlippedIn', 1.0).filter('isFlippedOut', 1.0)
+val_data = Dataset(val_fname).filter('isFlippedIn', 1.0).filter('isFlippedOut', 1.0)
+test_data = Dataset(test_fname).filter('isFlippedIn', 1.0).filter('isFlippedOut', 1.0)
 X_hit, X_info, y = train_data.get_data()
 X_val_hit, X_val_info, y_val = val_data.get_data()
 X_test_hit, X_test_info, y_test = test_data.get_data()
