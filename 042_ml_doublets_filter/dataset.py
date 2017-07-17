@@ -64,15 +64,45 @@ targetlabes = ["dummyFlag", "idTrack", "px", "py", "pz", "pt", "mT", "eT", "mSqr
 
 class Dataset:
     """ Load the dataset from txt files. """
-    def __init__(self, fname, delimit='\t'):
+    def __init__(self, fname, delimit='\t', max_rows=None):
         with open(fname, 'rb') as f:
             data = np.load(f)
             # Compressed .npz files return a dictionary
             if type(data) != np.ndarray:
                 data = data['arr_0']
+            if max_rows:
+                data = data[:max_rows, :]
             self.data = pd.DataFrame(data, columns=datalabs)
 
-    def get_hit_shapes(self, normalize=True):
+    def phi_correction(self, hits_in, hits_out):
+        #phi correction
+        cosPhiIns = np.cos(np.arctan(np.multiply(self.data["inY"], 1.0/self.data["inX"])))
+        cosPhiOuts = np.cos(np.arctan(np.multiply(self.data["outY"], 1.0/self.data["outX"])))
+        sinPhiIns = np.sin(np.arctan(np.multiply(self.data["inY"], 1.0/self.data["inX"])))
+        sinPhiOuts = np.sin(np.arctan(np.multiply(self.data["outY"], 1.0/self.data["outX"])))
+
+        inPhiModC = np.multiply(hits_in,cosPhiIns[:,np.newaxis])
+        outPhiModC = np.multiply(hits_out,cosPhiOuts[:,np.newaxis])
+
+        inPhiC  = hits_in  + inPhiModC
+        outPhiC = hits_out + outPhiModC
+        return inPhiC, outPhiC
+
+    def theta_correction(self, hits_in, hits_out):
+        #theta correction
+        cosThetaIns = np.cos(np.arctan(np.multiply(self.data["inY"],1.0/self.data["inZ"])))
+        cosThetaOuts = np.cos(np.arctan(np.multiply(self.data["outY"],1.0/self.data["outZ"])))
+        sinThetaIns = np.sin(np.arctan(np.multiply(self.data["inY"],1.0/self.data["inZ"])))
+        sinThetaOuts = np.sin(np.arctan(np.multiply(self.data["outY"],1.0/self.data["outZ"])))
+
+        inThetaModC = np.multiply(hits_in,cosThetaIns[:,np.newaxis])
+        outThetaModC = np.multiply(hits_out,cosThetaOuts[:,np.newaxis])
+
+        inThetaC  = hits_in  + inThetaModC
+        outThetaC = hits_out + outThetaModC
+        return inThetaC, outThetaC
+
+    def get_hit_shapes(self, normalize=True, angular_correction=True):
         """ Return hit shape features
         Args:
         -----
@@ -81,16 +111,22 @@ class Dataset:
         """
         a_in = self.data[inhitlabs].as_matrix()
         a_out = self.data[outhitlabs].as_matrix()
-        
+
         # Normalize data
         if normalize:
             self.scaler_in = StandardScaler()
             a_in = self.scaler_in.fit_transform(a_in)
             self.scaler_out = StandardScaler()
             a_out = self.scaler_out.fit_transform(a_out)
+        
+        l = [a_in, a_out]        
+        if angular_correction:
+            phi_in, phi_out = self.phi_correction(a_in, a_out)
+            theta_in, theta_out = self.theta_correction(a_in, a_out)
+            data = l + [phi_in, phi_out, theta_in, theta_out]
 
-        data = np.array([a_in, a_out]) # (2, batch_size, hit_size)
-        data = data.reshape((2, -1, 8, 8))
+        data = np.array(l) # (channels, batch_size, hit_size)
+        data = data.reshape((len(data), -1, 8, 8))
         return np.transpose(data, (1, 2, 3, 0))
 
     def get_info_features(self):
@@ -100,8 +136,8 @@ class Dataset:
     def get_labels(self):
         return self.data[target_lab].as_matrix() != 0.0
 
-    def get_data(self):
-        X_hit = self.get_hit_shapes()
+    def get_data(self, normalize=True):
+        X_hit = self.get_hit_shapes(normalize=normalize)
         X_info = self.get_info_features()
         y = to_categorical(self.get_labels())
         return X_hit, X_info, y
@@ -109,6 +145,7 @@ class Dataset:
     def save(self, fname):
         np.save(fname, self.data.as_matrix())
 
+    # TODO: pick doublets from same event.
     def balance_data(self, max_ratio=0.5, verbose=True):
         """ Balance the data. """ 
         data_neg = self.data[self.data[target_lab] == 0.0]
@@ -128,10 +165,10 @@ class Dataset:
 
 
 if __name__ == '__main__':
-    d = Dataset('data/1_1_5_dataset.txt')
+    d = Dataset('data/debug.npy')
     batch_size = d.data.as_matrix().shape[0]
 
-    x = d.get_hit_shapes()
+    x = d.get_data(normalize=False)[0]
     assert x.shape == (batch_size, 8, 8, 2)
     np.testing.assert_allclose(x[:, :,:,0], d.data[inhitlabs].as_matrix().reshape((-1, 8, 8)))
 
