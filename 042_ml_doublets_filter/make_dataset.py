@@ -10,26 +10,26 @@ import numpy as np
 COMPRESSED = False
 dir = "data/data/clean"
 
-all_data = []
-for fname in os.listdir(dir):
-    print("processsing: " + fname)
-    with gzip.open(dir + "/" + fname, 'rb') as f:
-        data = np.genfromtxt(f, delimiter='\t', dtype=np.float32)
-        all_data.append(data)
+def create_numpy_data(files):
+    all_data = []
+    for fname in files:
+        print("processsing: " + fname)
+        with gzip.open(dir + "/" + fname, 'rb') as f:
+            data = np.genfromtxt(f, delimiter='\t', dtype=np.float32)
+            all_data.append(data)
+    data = np.vstack(all_data)
+    return data
 
 
-data = np.vstack(all_data)
-np.random.shuffle(data)
+fnames = os.listdir()
+n_files = len(fnames)
+i_train = int(n_files * 0.5)
+i_val = int(n_files * 0.75)
 
-rows = data.shape[0]
-
-i_train = int(rows * 0.5)
-i_val = int(rows * 0.75)
-
-data_train = data[:i_train, :]
-data_val = data[i_train:i_val, :]
-data_test = data[i_val:, :]
-data_debug = data[:500, :]
+data_train = create_numpy_data(fnames[:i_train])
+data_val = create_numpy_data(fnames[i_train:i_val])
+data_test = create_numpy_data(fnames[i_val:])
+data_debug = data_train[:500, :]
 
 if COMPRESSED:
     np.savez_compressed('data/train.npz', data_train)
