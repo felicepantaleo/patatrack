@@ -114,11 +114,10 @@ class Dataset:
 
         # Normalize data
         if normalize:
-            self.scaler_in = StandardScaler()
-            a_in = self.scaler_in.fit_transform(a_in)
-            self.scaler_out = StandardScaler()
-            a_out = self.scaler_out.fit_transform(a_out)
-        
+            mean, std = (668.25684, 3919.5576) # mean, std precomputed for data NOPU 
+            a_in = (a_in - mean) / std
+            a_out = (a_out - mean) / std
+
         l = [a_in, a_out]        
         if angular_correction:
             phi_in, phi_out = self.phi_correction(a_in, a_out)
@@ -127,7 +126,12 @@ class Dataset:
 
         data = np.array(l) # (channels, batch_size, hit_size)
         data = data.reshape((len(data), -1, 8, 8))
-        return np.transpose(data, (1, 2, 3, 0))
+        return np.transpose(data, (1, 2, 3, 0))  # TODO: not optimal for CPU execution
+
+    def filter(self, feature_name, value):
+        """ filter data keeping only those samples where s[feature_name] = value """
+        self.data = self.data[self.data[feature_name] == value]
+        return self  # to allow method chaining
 
     def get_info_features(self):
         """ Returns info features as numpy array. """
