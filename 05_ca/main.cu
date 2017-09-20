@@ -21,6 +21,7 @@
 #include <assert.h>
 #include <tbb/concurrent_queue.h>
 #include <omp.h>
+#include <tuple>
 
 #include "Event.h"
 #include "GPUHitsAndDoublets.h"
@@ -498,6 +499,27 @@ int main(int argc, char** argv)
         }
     }
 
+    std::vector<tbb::concurrent_queue<unsigned int>> streamQueues(nGPUs);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        for (unsigned int streamIndex = 0 ; streamIndex < numberOfCUDAStreams ; ++streamIndex)
+        {
+            streamQueues[gpuIndex].push(streamIndex);
+        }
+    }
+
+    using tuple_t = std::tuple<tbb::concurrent_queue<unsigned int>*, unsigned int, unsigned int>;
+    std::vector<std::vector<tuple_t>> backReferences(nGPUs);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        backReferences[gpuIndex].resize(numberOfCUDAStreams);
+        for (unsigned int streamIndex = 0 ; streamIndex < numberOfCUDAStreams ; ++streamIndex)
+        {
+            backReferences[gpuIndex][streamIndex] =
+                std::make_tuple(&streamQueues[gpuIndex], gpuIndex, streamIndex);
+        }
+    }
+
 std::vector<unsigned int> processedEventsPerThread;
 processedEventsPerThread.resize(numberOfCPUThreads,0);
 		std::cout << "Execution run will start in 3 second.\n" << std::endl;
@@ -522,10 +544,10 @@ double start = omp_get_wtime();
             {
 
                 cudaSetDevice(gpuIndex);
-                streamIndex = (streamIndex + 1) % numberOfCUDAStreams;
-                cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
+                // streamIndex = (streamIndex + 1) % numberOfCUDAStreams;
                 unsigned int i;
                 queue.try_pop(i);
+                while(!streamQueues[gpuIndex].try_pop(streamIndex));
                 processedEventsPerThread[threadId]++;
 
                 auto d_firstLayerPairInEvt = maxNumberOfLayerPairs * streamIndex;
@@ -644,6 +666,19 @@ double start = omp_get_wtime();
 //        cudaStreamSynchronize(streams[streamIndex]);
 //        std::cout << "found quadruplets " << h_foundNtuplets[streamIndex].size() << std::endl;
 
+                // cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
+
+                cudaStreamAddCallback(streams[gpuIndex][streamIndex],
+                    [](cudaStream_t, cudaError_t, void *data) -> void
+                    {
+                        auto tup = static_cast<tuple_t*>(data);
+                        auto queue = std::get<0>(*tup);
+                        auto streamIndex = std::get<2>(*tup);
+                        queue->push(streamIndex);
+                    },
+                    static_cast<void*>(&backReferences[gpuIndex][streamIndex]),
+                    0
+                );
             }
 
             for (int i = 0; i < numberOfCUDAStreams; ++i)
