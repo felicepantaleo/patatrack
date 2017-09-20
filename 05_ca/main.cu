@@ -520,6 +520,15 @@ int main(int argc, char** argv)
         }
     }
 
+#if defined(DEBUG)
+    std::vector<std::vector<unsigned int>> nQuadruplets(nEvents);
+    for (std::size_t n = 0 ; n < nEvents ; ++n) {
+        nQuadruplets[n].reserve(numberOfIterations);
+    }
+    using dbgTup_t = std::tuple<std::vector<unsigned int>*, GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet>*>;
+    std::vector<std::vector<dbgTup_t>> dbgBackrefs(nGPUs, std::vector<dbgTup_t>(numberOfCUDAStreams));
+#endif // defined(DEBUG)
+
 std::vector<unsigned int> processedEventsPerThread;
 processedEventsPerThread.resize(numberOfCPUThreads,0);
 		std::cout << "Execution run will start in 3 second.\n" << std::endl;
@@ -679,6 +688,21 @@ double start = omp_get_wtime();
                     static_cast<void*>(&backReferences[gpuIndex][streamIndex]),
                     0
                 );
+
+#if defined(DEBUG)
+                dbgBackrefs[gpuIndex][streamIndex] = dbgTup_t(&nQuadruplets[i], &h_foundNtuplets[streamIndex]);
+                cudaStreamAddCallback(streams[gpuIndex][streamIndex],
+                    [](cudaStream_t, cudaError_t, void *data) -> void
+                    {
+                        auto tup = static_cast<dbgTup_t*>(data);
+                        auto vec = std::get<0>(*tup);
+                        auto foundNtuplets = std::get<1>(*tup);
+                        vec->push_back(foundNtuplets->size());
+                    },
+                    static_cast<void*>(&dbgBackrefs[gpuIndex][streamIndex]),
+                    0
+                );
+#endif // defined(DEBUG)
             }
 
             for (int i = 0; i < numberOfCUDAStreams; ++i)
@@ -741,6 +765,16 @@ double start = omp_get_wtime();
 
 
 double stop = omp_get_wtime();
+
+#if defined(DEBUG)
+    for (std::size_t it = 0 ; it < numberOfIterations ; ++it) {
+        std::cerr << "Iteration " << it << ":" << std::endl;
+        for (std::size_t n = 0 ; n < nEvents ; ++n) {
+            std::cerr << "    " << n << ": " << nQuadruplets[n][it] << std::endl;
+        }
+        std::cerr << std::endl;
+    }
+#endif // defined(DEBUG)
 
     std::cout << "Summary: " << std::endl;
     unsigned int processedByGPU = 0;
