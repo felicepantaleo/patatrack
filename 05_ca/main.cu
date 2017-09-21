@@ -553,7 +553,6 @@ double start = omp_get_wtime();
             {
 
                 cudaSetDevice(gpuIndex);
-                // streamIndex = (streamIndex + 1) % numberOfCUDAStreams;
                 unsigned int i;
                 queue.try_pop(i);
                 while(!streamQueues[gpuIndex].try_pop(streamIndex));
@@ -677,18 +676,6 @@ double start = omp_get_wtime();
 
                 // cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
 
-                cudaStreamAddCallback(streams[gpuIndex][streamIndex],
-                    [](cudaStream_t, cudaError_t, void *data) -> void
-                    {
-                        auto tup = static_cast<tuple_t*>(data);
-                        auto queue = std::get<0>(*tup);
-                        auto streamIndex = std::get<2>(*tup);
-                        queue->push(streamIndex);
-                    },
-                    static_cast<void*>(&backReferences[gpuIndex][streamIndex]),
-                    0
-                );
-
 #if defined(DEBUG)
                 dbgBackrefs[gpuIndex][streamIndex] = dbgTup_t(&nQuadruplets[i], &h_foundNtuplets[streamIndex]);
                 cudaStreamAddCallback(streams[gpuIndex][streamIndex],
@@ -703,6 +690,18 @@ double start = omp_get_wtime();
                     0
                 );
 #endif // defined(DEBUG)
+
+                cudaStreamAddCallback(streams[gpuIndex][streamIndex],
+                    [](cudaStream_t, cudaError_t, void *data) -> void
+                    {
+                        auto tup = static_cast<tuple_t*>(data);
+                        auto queue = std::get<0>(*tup);
+                        auto streamIndex = std::get<2>(*tup);
+                        queue->push(streamIndex);
+                    },
+                    static_cast<void*>(&backReferences[gpuIndex][streamIndex]),
+                    0
+                );
             }
 
             for (int i = 0; i < numberOfCUDAStreams; ++i)
