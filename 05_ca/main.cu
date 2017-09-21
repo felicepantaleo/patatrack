@@ -636,7 +636,7 @@ double start = omp_get_wtime();
                 dim3 numberOfBlocks_find(8, h_allEvents[i].numberOfRootLayerPairs);
 // KERNELS
 //        debug_input_data<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex], &d_doublets[d_firstLayerPairInEvt], &d_layers[d_firstLayerInEvt],d_regionParams,  maxNumberOfHits );
-                kernel_create<<<numberOfBlocks_create,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex], &d_doublets[gpuIndex][d_firstLayerPairInEvt],
+                kernel_create<<<numberOfBlocks_create,32,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex], &d_doublets[gpuIndex][d_firstLayerPairInEvt],
                         &d_layers[gpuIndex][d_firstLayerInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
                         &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], &d_foundNtuplets[gpuIndex][streamIndex],d_regionParams[gpuIndex], maxNumberOfDoublets, maxNumberOfHits);
 
@@ -645,7 +645,7 @@ double start = omp_get_wtime();
 //                &d_layers[d_firstLayerInEvt], &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets],
 //                &device_isOuterHitOfCell[d_firstHitInEvent], &d_foundNtuplets[streamIndex],
 //                d_regionParams, theThetaCut, thePhiCut,theHardPtCut,maxNumberOfDoublets, maxNumberOfHits);
-                kernel_connect<<<numberOfBlocks_connect,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
+                kernel_connect<<<numberOfBlocks_connect,512,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
                         &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
                         &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], d_regionParams[gpuIndex], theThetaCut, thePhiCut,
                         theHardPtCut, maxNumberOfDoublets, maxNumberOfHits);
@@ -655,7 +655,7 @@ double start = omp_get_wtime();
 //                 d_regionParams, maxNumberOfDoublets, maxNumberOfHits);
 //        cudaMemsetAsync(&d_foundNtuplets[streamIndex], 0, sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ), streams[streamIndex]);
 
-                kernel_find_ntuplets<<<numberOfBlocks_find,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
+                kernel_find_ntuplets<<<numberOfBlocks_find,1024,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
                         &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
                         &d_foundNtuplets[gpuIndex][streamIndex],&d_rootLayerPairs[gpuIndex][maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
 
