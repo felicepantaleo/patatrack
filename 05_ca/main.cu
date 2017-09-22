@@ -22,6 +22,7 @@
 #include <tbb/concurrent_queue.h>
 #include <omp.h>
 #include <tuple>
+#include <mutex>
 
 #include "Event.h"
 #include "GPUHitsAndDoublets.h"
@@ -522,10 +523,11 @@ int main(int argc, char** argv)
 
 #if defined(DEBUG)
     std::vector<std::vector<unsigned int>> nQuadruplets(nEvents);
+    std::vector<std::mutex> mtx_nQuadruplets(nEvents);
     for (std::size_t n = 0 ; n < nEvents ; ++n) {
         nQuadruplets[n].reserve(numberOfIterations);
     }
-    using dbgTup_t = std::tuple<std::vector<unsigned int>*, GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet>*>;
+    using dbgTup_t = std::tuple<std::vector<unsigned int>*, std::mutex*, GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet>*>;
     std::vector<std::vector<dbgTup_t>> dbgBackrefs(nGPUs, std::vector<dbgTup_t>(numberOfCUDAStreams));
 #endif // defined(DEBUG)
 
@@ -677,14 +679,17 @@ double start = omp_get_wtime();
                 // cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
 
 #if defined(DEBUG)
-                dbgBackrefs[gpuIndex][streamIndex] = dbgTup_t(&nQuadruplets[i], &h_foundNtuplets[streamIndex]);
+                dbgBackrefs[gpuIndex][streamIndex] = dbgTup_t(&nQuadruplets[i], &mtx_nQuadruplets[i], &h_foundNtuplets[streamIndex]);
                 cudaStreamAddCallback(streams[gpuIndex][streamIndex],
                     [](cudaStream_t, cudaError_t, void *data) -> void
                     {
                         auto tup = static_cast<dbgTup_t*>(data);
                         auto vec = std::get<0>(*tup);
-                        auto foundNtuplets = std::get<1>(*tup);
-                        vec->push_back(foundNtuplets->size());
+                        auto mtx = std::get<1>(*tup);
+                        auto foundNtuplets = std::get<2>(*tup);
+                        const auto sz = foundNtuplets->size();
+                        std::lock_guard<std::mutex> guard(*mtx);
+                        vec->push_back(sz);
                     },
                     static_cast<void*>(&dbgBackrefs[gpuIndex][streamIndex]),
                     0
@@ -765,7 +770,7 @@ double start = omp_get_wtime();
 
 double stop = omp_get_wtime();
 
-#if defined(DEBUG)
+#if defined(DEBUG) && defined(VERBOSE)
     for (std::size_t it = 0 ; it < numberOfIterations ; ++it) {
         std::cerr << "Iteration " << it << ":" << std::endl;
         for (std::size_t n = 0 ; n < nEvents ; ++n) {
@@ -773,7 +778,7 @@ double stop = omp_get_wtime();
         }
         std::cerr << std::endl;
     }
-#endif // defined(DEBUG)
+#endif // defined(DEBUG) && defined(VERBOSE)
 
     std::cout << "Summary: " << std::endl;
     unsigned int processedByGPU = 0;
