@@ -18,7 +18,7 @@
 #include <thread>
 #include <vector>
 #include <iostream>
-#include <assert.h>
+#include <cassert>
 #include <tbb/concurrent_queue.h>
 #include <omp.h>
 #include <tuple>
@@ -779,6 +779,20 @@ double stop = omp_get_wtime();
         std::cerr << std::endl;
     }
 #endif // defined(DEBUG) && defined(VERBOSE)
+
+#if defined(DEBUG) && defined(ASSERT)
+    for (std::size_t n = 0 ; n < nEvents ; ++n) {
+        assert(nQuadruplets[n].size() == numberOfIterations);
+        assert(nQuadruplets[n].size() > 0);
+        const auto ref = nQuadruplets[n][0];
+        for (std::size_t it = 0 ; it < numberOfIterations ; ++it) {
+            if (nQuadruplets[n][it] != ref) {
+                std::cerr << "Event " << n << ", it. " << it << ": expected " << ref << ", got " << nQuadruplets[n][it] << " instead" << std::endl << std::flush;
+            }
+            assert(nQuadruplets[n][it] == ref);
+        }
+    }
+#endif // defined(DEBUG) && defined(ASSERT)
 
     std::cout << "Summary: " << std::endl;
     unsigned int processedByGPU = 0;
