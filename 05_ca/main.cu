@@ -217,6 +217,9 @@ int main(int argc, char** argv)
     constexpr const float thePhiCut = 0.2f;
     constexpr const float theHardPtCut = 0.0f;
 
+    int nGPUs;
+    cudaGetDeviceCount(&nGPUs);
+
     // HOST ALLOCATIONS FOR THE INPUT
     //////////////////////////////////////
     GPUEvent *h_allEvents;
@@ -240,9 +243,12 @@ int main(int argc, char** argv)
     cudaMallocHost(&h_z, nEvents * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
     cudaMallocHost(&h_rootLayerPairs, nEvents * maxNumberOfRootLayerPairs * sizeof(int));
 
-    GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> * h_foundNtuplets;
-    cudaMallocHost(&h_foundNtuplets,
+    std::vector<GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> *> h_foundNtuplets(nGPUs);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        cudaMallocHost(&h_foundNtuplets[gpuIndex],
             eventsPreallocatedOnGPU * sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ));
+    }
 
     for (unsigned int i = 0; i < nEvents; ++i)
     {
@@ -357,9 +363,6 @@ int main(int argc, char** argv)
     }
 #endif
 
-    int nGPUs;
-
-    cudaGetDeviceCount(&nGPUs);
     std::cout << "Number of available GPUs " << nGPUs << std::endl;
     std::cout << "Using " << numberOfCPUThreads << " CPU threads " << std::endl;
 
@@ -664,7 +667,7 @@ double start = omp_get_wtime();
 //        kernel_debug_find_ntuplets<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex],
 //                &d_doublets[d_firstLayerPairInEvt], &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets],
 //                &d_foundNtuplets[streamIndex],&d_rootLayerPairs[maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
-                cudaMemcpyAsync(&h_foundNtuplets[streamIndex],
+                cudaMemcpyAsync(&h_foundNtuplets[gpuIndex][streamIndex],
                         &d_foundNtuplets[gpuIndex][streamIndex],
                         sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ),
                         cudaMemcpyDeviceToHost, streams[gpuIndex][streamIndex]);
@@ -679,7 +682,7 @@ double start = omp_get_wtime();
                 // cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
 
 #if defined(DEBUG)
-                dbgBackrefs[gpuIndex][streamIndex] = dbgTup_t(&nQuadruplets[i], &mtx_nQuadruplets[i], &h_foundNtuplets[streamIndex]);
+                dbgBackrefs[gpuIndex][streamIndex] = dbgTup_t(&nQuadruplets[i], &mtx_nQuadruplets[i], &h_foundNtuplets[gpuIndex][streamIndex]);
                 cudaStreamAddCallback(streams[gpuIndex][streamIndex],
                     [](cudaStream_t, cudaError_t, void *data) -> void
                     {
@@ -847,7 +850,10 @@ double stop = omp_get_wtime();
     }
     std::cout << "deleting Host memory " << std::endl;
 
-    cudaFreeHost(h_foundNtuplets);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        cudaFreeHost(h_foundNtuplets[gpuIndex]);
+    }
     cudaFreeHost(h_regionParams);
     cudaFreeHost(h_allEvents);
     cudaFreeHost(h_layers);
