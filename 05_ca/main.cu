@@ -18,9 +18,11 @@
 #include <thread>
 #include <vector>
 #include <iostream>
-#include <assert.h>
+#include <cassert>
 #include <tbb/concurrent_queue.h>
 #include <omp.h>
+#include <tuple>
+#include <mutex>
 
 #include "Event.h"
 #include "GPUHitsAndDoublets.h"
@@ -215,6 +217,9 @@ int main(int argc, char** argv)
     constexpr const float thePhiCut = 0.2f;
     constexpr const float theHardPtCut = 0.0f;
 
+    int nGPUs;
+    cudaGetDeviceCount(&nGPUs);
+
     // HOST ALLOCATIONS FOR THE INPUT
     //////////////////////////////////////
     GPUEvent *h_allEvents;
@@ -238,9 +243,12 @@ int main(int argc, char** argv)
     cudaMallocHost(&h_z, nEvents * maxNumberOfLayers * maxNumberOfHits * sizeof(float));
     cudaMallocHost(&h_rootLayerPairs, nEvents * maxNumberOfRootLayerPairs * sizeof(int));
 
-    GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> * h_foundNtuplets;
-    cudaMallocHost(&h_foundNtuplets,
+    std::vector<GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> *> h_foundNtuplets(nGPUs);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        cudaMallocHost(&h_foundNtuplets[gpuIndex],
             eventsPreallocatedOnGPU * sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ));
+    }
 
     for (unsigned int i = 0; i < nEvents; ++i)
     {
@@ -355,9 +363,6 @@ int main(int argc, char** argv)
     }
 #endif
 
-    int nGPUs;
-
-    cudaGetDeviceCount(&nGPUs);
     std::cout << "Number of available GPUs " << nGPUs << std::endl;
     std::cout << "Using " << numberOfCPUThreads << " CPU threads " << std::endl;
 
@@ -498,6 +503,37 @@ int main(int argc, char** argv)
         }
     }
 
+    std::vector<tbb::concurrent_queue<unsigned int>> streamQueues(nGPUs);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        for (unsigned int streamIndex = 0 ; streamIndex < numberOfCUDAStreams ; ++streamIndex)
+        {
+            streamQueues[gpuIndex].push(streamIndex);
+        }
+    }
+
+    using tuple_t = std::tuple<tbb::concurrent_queue<unsigned int>*, unsigned int, unsigned int>;
+    std::vector<std::vector<tuple_t>> backReferences(nGPUs);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        backReferences[gpuIndex].resize(numberOfCUDAStreams);
+        for (unsigned int streamIndex = 0 ; streamIndex < numberOfCUDAStreams ; ++streamIndex)
+        {
+            backReferences[gpuIndex][streamIndex] =
+                std::make_tuple(&streamQueues[gpuIndex], gpuIndex, streamIndex);
+        }
+    }
+
+#if defined(DEBUG)
+    std::vector<std::vector<unsigned int>> nQuadruplets(nEvents);
+    std::vector<std::mutex> mtx_nQuadruplets(nEvents);
+    for (std::size_t n = 0 ; n < nEvents ; ++n) {
+        nQuadruplets[n].reserve(numberOfIterations);
+    }
+    using dbgTup_t = std::tuple<std::vector<unsigned int>*, std::mutex*, GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet>*>;
+    std::vector<std::vector<dbgTup_t>> dbgBackrefs(nGPUs, std::vector<dbgTup_t>(numberOfCUDAStreams));
+#endif // defined(DEBUG)
+
 std::vector<unsigned int> processedEventsPerThread;
 processedEventsPerThread.resize(numberOfCPUThreads,0);
 		std::cout << "Execution run will start in 3 second.\n" << std::endl;
@@ -522,10 +558,9 @@ double start = omp_get_wtime();
             {
 
                 cudaSetDevice(gpuIndex);
-                streamIndex = (streamIndex + 1) % numberOfCUDAStreams;
-                cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
                 unsigned int i;
                 queue.try_pop(i);
+                while(!streamQueues[gpuIndex].try_pop(streamIndex));
                 processedEventsPerThread[threadId]++;
 
                 auto d_firstLayerPairInEvt = maxNumberOfLayerPairs * streamIndex;
@@ -606,7 +641,7 @@ double start = omp_get_wtime();
                 dim3 numberOfBlocks_find(8, h_allEvents[i].numberOfRootLayerPairs);
 // KERNELS
 //        debug_input_data<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex], &d_doublets[d_firstLayerPairInEvt], &d_layers[d_firstLayerInEvt],d_regionParams,  maxNumberOfHits );
-                kernel_create<<<numberOfBlocks_create,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex], &d_doublets[gpuIndex][d_firstLayerPairInEvt],
+                kernel_create<<<numberOfBlocks_create,32,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex], &d_doublets[gpuIndex][d_firstLayerPairInEvt],
                         &d_layers[gpuIndex][d_firstLayerInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
                         &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], &d_foundNtuplets[gpuIndex][streamIndex],d_regionParams[gpuIndex], maxNumberOfDoublets, maxNumberOfHits);
 
@@ -615,7 +650,7 @@ double start = omp_get_wtime();
 //                &d_layers[d_firstLayerInEvt], &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets],
 //                &device_isOuterHitOfCell[d_firstHitInEvent], &d_foundNtuplets[streamIndex],
 //                d_regionParams, theThetaCut, thePhiCut,theHardPtCut,maxNumberOfDoublets, maxNumberOfHits);
-                kernel_connect<<<numberOfBlocks_connect,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
+                kernel_connect<<<numberOfBlocks_connect,512,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
                         &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
                         &device_isOuterHitOfCell[gpuIndex][d_firstHitInEvent], d_regionParams[gpuIndex], theThetaCut, thePhiCut,
                         theHardPtCut, maxNumberOfDoublets, maxNumberOfHits);
@@ -625,14 +660,14 @@ double start = omp_get_wtime();
 //                 d_regionParams, maxNumberOfDoublets, maxNumberOfHits);
 //        cudaMemsetAsync(&d_foundNtuplets[streamIndex], 0, sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ), streams[streamIndex]);
 
-                kernel_find_ntuplets<<<numberOfBlocks_find,256,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
+                kernel_find_ntuplets<<<numberOfBlocks_find,1024,0,streams[gpuIndex][streamIndex]>>>(&d_events[gpuIndex][streamIndex],
                         &d_doublets[gpuIndex][d_firstLayerPairInEvt], &device_theCells[gpuIndex][d_firstLayerPairInEvt*maxNumberOfDoublets],
                         &d_foundNtuplets[gpuIndex][streamIndex],&d_rootLayerPairs[gpuIndex][maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
 
 //        kernel_debug_find_ntuplets<<<1,1,0,streams[streamIndex]>>>(&d_events[streamIndex],
 //                &d_doublets[d_firstLayerPairInEvt], &device_theCells[d_firstLayerPairInEvt*maxNumberOfDoublets],
 //                &d_foundNtuplets[streamIndex],&d_rootLayerPairs[maxNumberOfRootLayerPairs*streamIndex], 4 , maxNumberOfDoublets);
-                cudaMemcpyAsync(&h_foundNtuplets[streamIndex],
+                cudaMemcpyAsync(&h_foundNtuplets[gpuIndex][streamIndex],
                         &d_foundNtuplets[gpuIndex][streamIndex],
                         sizeof(GPUSimpleVector<maxNumberOfQuadruplets, Quadruplet> ),
                         cudaMemcpyDeviceToHost, streams[gpuIndex][streamIndex]);
@@ -644,6 +679,37 @@ double start = omp_get_wtime();
 //        cudaStreamSynchronize(streams[streamIndex]);
 //        std::cout << "found quadruplets " << h_foundNtuplets[streamIndex].size() << std::endl;
 
+                // cudaStreamSynchronize (streams[gpuIndex][streamIndex]);
+
+#if defined(DEBUG)
+                dbgBackrefs[gpuIndex][streamIndex] = dbgTup_t(&nQuadruplets[i], &mtx_nQuadruplets[i], &h_foundNtuplets[gpuIndex][streamIndex]);
+                cudaStreamAddCallback(streams[gpuIndex][streamIndex],
+                    [](cudaStream_t, cudaError_t, void *data) -> void
+                    {
+                        auto tup = static_cast<dbgTup_t*>(data);
+                        auto vec = std::get<0>(*tup);
+                        auto mtx = std::get<1>(*tup);
+                        auto foundNtuplets = std::get<2>(*tup);
+                        const auto sz = foundNtuplets->size();
+                        std::lock_guard<std::mutex> guard(*mtx);
+                        vec->push_back(sz);
+                    },
+                    static_cast<void*>(&dbgBackrefs[gpuIndex][streamIndex]),
+                    0
+                );
+#endif // defined(DEBUG)
+
+                cudaStreamAddCallback(streams[gpuIndex][streamIndex],
+                    [](cudaStream_t, cudaError_t, void *data) -> void
+                    {
+                        auto tup = static_cast<tuple_t*>(data);
+                        auto queue = std::get<0>(*tup);
+                        auto streamIndex = std::get<2>(*tup);
+                        queue->push(streamIndex);
+                    },
+                    static_cast<void*>(&backReferences[gpuIndex][streamIndex]),
+                    0
+                );
             }
 
             for (int i = 0; i < numberOfCUDAStreams; ++i)
@@ -707,6 +773,30 @@ double start = omp_get_wtime();
 
 double stop = omp_get_wtime();
 
+#if defined(DEBUG) && defined(VERBOSE)
+    for (std::size_t it = 0 ; it < numberOfIterations ; ++it) {
+        std::cerr << "Iteration " << it << ":" << std::endl;
+        for (std::size_t n = 0 ; n < nEvents ; ++n) {
+            std::cerr << "    " << n << ": " << nQuadruplets[n][it] << std::endl;
+        }
+        std::cerr << std::endl;
+    }
+#endif // defined(DEBUG) && defined(VERBOSE)
+
+#if defined(DEBUG) && defined(ASSERT)
+    for (std::size_t n = 0 ; n < nEvents ; ++n) {
+        assert(nQuadruplets[n].size() == numberOfIterations);
+        assert(nQuadruplets[n].size() > 0);
+        const auto ref = nQuadruplets[n][0];
+        for (std::size_t it = 0 ; it < numberOfIterations ; ++it) {
+            if (nQuadruplets[n][it] != ref) {
+                std::cerr << "Event " << n << ", it. " << it << ": expected " << ref << ", got " << nQuadruplets[n][it] << " instead" << std::endl << std::flush;
+            }
+            assert(nQuadruplets[n][it] == ref);
+        }
+    }
+#endif // defined(DEBUG) && defined(ASSERT)
+
     std::cout << "Summary: " << std::endl;
     unsigned int processedByGPU = 0;
     unsigned int processedByCPU = 0;
@@ -760,7 +850,10 @@ double stop = omp_get_wtime();
     }
     std::cout << "deleting Host memory " << std::endl;
 
-    cudaFreeHost(h_foundNtuplets);
+    for (unsigned int gpuIndex = 0 ; gpuIndex < nGPUs ; ++gpuIndex)
+    {
+        cudaFreeHost(h_foundNtuplets[gpuIndex]);
+    }
     cudaFreeHost(h_regionParams);
     cudaFreeHost(h_allEvents);
     cudaFreeHost(h_layers);

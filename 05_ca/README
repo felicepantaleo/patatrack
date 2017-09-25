@@ -1,5 +1,5 @@
 Compile with:
-nvcc main.cu -std=c++11 -default-stream per-thread -Wno-deprecated-gpu-targets -O2 -ltbb -Xcompiler -fopenmp -o ca
+nvcc main.cu -arch=sm_61 -std=c++11 -default-stream per-thread -Wno-deprecated-gpu-targets -O3 -ltbb -Xcompiler -fopenmp -o ca 
 
 Execute with: 
 ./ca -n 120 -s 8 -i ../input/parsed_ttbar50PU_1000evts.txt -j 32 -t 1000
